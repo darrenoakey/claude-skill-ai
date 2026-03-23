@@ -1,440 +1,331 @@
 ---
 name: ai
-description: Claude Agent SDK integration for programmatic AI. Use when building tools that need AI to make decisions, generate content, summarize, classify, or transform data. ALWAYS use this skill when building anything that uses "claude" or "ai" - NEVER use the raw Claude API.
+description: daz-agent-sdk — provider-agnostic AI with tier-based routing and automatic fallback. Use when building anything that needs programmatic AI (text, structured output, agentic, image, TTS, STT). NEVER use raw claude_agent_sdk or Claude API directly.
 ---
 
-# Claude Agent SDK - Programmatic AI Integration
+# daz-agent-sdk — Programmatic AI Integration
 
-This skill provides standards and patterns for integrating AI capabilities into tools and scripts using the **Claude Agent SDK**. The SDK uses ambient authentication from Claude Code - no API keys required.
+Provider-agnostic AI library with tier-based routing and automatic fallback across Claude, Gemini, Codex, and Ollama. One import, one line per query. No API keys needed for Claude (ambient auth from Claude Code).
 
-## CRITICAL: When This Skill Applies
+## When This Skill Applies
 
-**Whenever you see "claude", "ai", "llm", or need programmatic AI capabilities, READ THIS SKILL FIRST.**
-
-This includes:
-- Building tools that need AI decisions
-- Generating summaries or content
-- Classification or categorization
-- Data transformation with intelligence
-- Natural language to structured output
-- Any programmatic Claude integration
-
-## Claude Agent SDK vs Claude API (NEVER USE THE API)
-
-| Aspect | Claude Agent SDK (USE THIS) | Claude API (NEVER USE) |
-|--------|----------------------------|------------------------|
-| **Authentication** | Ambient - uses Claude Code auth | Requires API key |
-| **Tool handling** | Automatic - Claude handles tools | Manual - you implement loop |
-| **Setup** | `pip install claude-agent-sdk` | Different package |
-| **Use case** | Autonomous agents, programmatic AI | Direct API calls |
-
-**The SDK is the ONLY approved method for programmatic Claude integration.**
+Any time code needs programmatic AI: text generation, structured output, classification, summarization, agentic tool use, image generation, TTS, STT. If you see `claude_agent_sdk`, `anthropic`, `openai`, or `google.genai` used for AI queries — replace with `daz_agent_sdk`.
 
 ---
 
 ## Installation
 
 ```bash
-pip install claude-agent-sdk
+# From the project directory
+cd /Volumes/T9/darrenoakey/src/daz-agent-sdk
+./run install          # installs system-wide as editable package
+
+# Or via pip
+pip install -e /Volumes/T9/darrenoakey/src/daz-agent-sdk
 ```
 
-**Requirements:** Python 3.10+
+Requires Python 3.11+.
 
-The Claude Code CLI authentication is used automatically - no API key configuration needed.
+### Go
+
+```bash
+go get github.com/darrenoakey/daz-agent-sdk/go
+```
+
+Full Go port with Ollama provider, image gen (Z-Image-Turbo via Ollama), TTS/STT subprocess wrappers. See `go/README.md` for usage.
 
 ---
 
-## Core Pattern: Simple Query
-
-Use this pattern when you need Claude to analyze input and return a text response.
+## Imports
 
 ```python
-#!/usr/bin/env python3
+from daz_agent_sdk import agent                          # ready-to-use singleton
+from daz_agent_sdk import Agent, Conversation            # classes
+from daz_agent_sdk import Tier, Capability, ErrorKind    # enums
+from daz_agent_sdk import Response, StructuredResponse   # response types
+from daz_agent_sdk import ImageResult, AudioResult       # capability results
+from daz_agent_sdk import Message, ModelInfo, AgentError # supporting types
+```
 
+---
+
+## Tiers
+
+Tiers control which providers and models are used. The fallback engine cascades through the tier chain on transient errors.
+
+| Tier | Models (in fallback order) | Use Case |
+|------|---------------------------|----------|
+| `Tier.VERY_HIGH` | claude-opus-4-6 → gpt-5.3-codex → gemini-2.5-pro | Critical, highest quality |
+| `Tier.HIGH` | claude-opus-4-6 → gpt-5.3-codex → gemini-2.5-pro | Default — general purpose |
+| `Tier.MEDIUM` | claude-sonnet-4-6 → gpt-5.3-codex → gemini-2.5-flash | Balanced speed/quality |
+| `Tier.LOW` | claude-haiku-4-5 → gemini-2.5-flash-lite → ollama:qwen3-8b | Fast, cheap |
+| `Tier.FREE_FAST` | ollama:qwen3-8b | Local only, zero cost |
+| `Tier.FREE_THINKING` | ollama:qwen3-30b-32k → ollama:deepseek-r1:14b | Local reasoning, zero cost |
+
+---
+
+## Simple Ask (One-Shot)
+
+```python
 import asyncio
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
-
-
-async def ask_claude(prompt: str) -> str:
-    """Query Claude and return the text response."""
-    response_text = ""
-
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            allowed_tools=[],
-            permission_mode="bypassPermissions"
-        )
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    response_text += block.text
-
-    return response_text.strip()
-
+from daz_agent_sdk import agent, Tier
 
 async def main():
-    result = await ask_claude("What is 2 + 2?")
-    print(result)
+    # Default tier (HIGH) — uses Claude, falls back to Gemini/Codex
+    answer = await agent.ask("Explain quantum tunnelling in one paragraph")
+    print(answer.text)
 
+    # Cheap/fast tier
+    answer = await agent.ask("Summarise this text: ...", tier=Tier.LOW)
+    print(answer.text)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Free local model
+    answer = await agent.ask("What is 2+2?", tier=Tier.FREE_FAST)
+    print(answer.text)
+
+    # With system prompt
+    answer = await agent.ask(
+        "Review this function for bugs",
+        system="You are a senior code reviewer. Be concise.",
+    )
+    print(answer.text)
+
+asyncio.run(main())
+```
+
+### Response Object
+
+```python
+answer = await agent.ask("Hello")
+answer.text              # str — the response text
+answer.model_used        # ModelInfo — which model actually responded
+answer.model_used.provider        # "claude", "gemini", etc.
+answer.model_used.qualified_name  # "claude:claude-opus-4-6"
+answer.conversation_id   # UUID
+answer.turn_id           # UUID
+answer.usage             # dict — token counts etc.
 ```
 
 ---
 
-## Core Pattern: JSON Response
+## Structured Output (Pydantic)
 
-Use this pattern when you need structured output. Claude returns JSON that you parse.
-
-```python
-#!/usr/bin/env python3
-
-import asyncio
-import json
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
-
-
-async def get_structured_response(prompt: str) -> dict:
-    """Query Claude for JSON and parse the response."""
-    response_text = ""
-
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            allowed_tools=[],
-            permission_mode="bypassPermissions"
-        )
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    response_text += block.text
-
-    # Handle markdown code blocks in response
-    text = response_text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = lines[1:]  # Remove opening ```json or ```
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]  # Remove closing ```
-        text = "\n".join(lines)
-
-    return json.loads(text)
-
-
-async def classify_text(text: str) -> dict:
-    """Classify text into categories."""
-    prompt = f"""Classify the following text.
-
-Return ONLY valid JSON with these fields:
-- "category": one of ["question", "statement", "command", "greeting"]
-- "sentiment": one of ["positive", "neutral", "negative"]
-- "confidence": float between 0 and 1
-
-Text: {text}
-
-Return JSON only, no explanation."""
-
-    return await get_structured_response(prompt)
-
-
-async def main():
-    result = await classify_text("Hello, how are you today?")
-    print(json.dumps(result, indent=2))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
----
-
-## Core Pattern: With Tools
-
-Use this pattern when Claude needs to read files, run commands, or interact with the system.
+Pass a Pydantic model as `schema=` to get validated, typed responses. No JSON parsing, no markdown stripping — it just works.
 
 ```python
-#!/usr/bin/env python3
+from pydantic import BaseModel
+from daz_agent_sdk import agent, Tier
 
-import asyncio
-from claude_agent_sdk import query, ClaudeAgentOptions
+class Sentiment(BaseModel):
+    label: str          # "positive", "neutral", "negative"
+    confidence: float   # 0.0 to 1.0
+    reasoning: str
 
-
-async def analyze_codebase(question: str) -> None:
-    """Let Claude analyze the codebase to answer a question."""
-    async for message in query(
-        prompt=question,
-        options=ClaudeAgentOptions(
-            allowed_tools=["Read", "Glob", "Grep"],
-            permission_mode="bypassPermissions"
-        )
-    ):
-        if hasattr(message, "result"):
-            print(message.result)
-
-
-async def main():
-    await analyze_codebase("Find all TODO comments in this project")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
----
-
-## Available Tools
-
-| Tool | Description | When to Allow |
-|------|-------------|---------------|
-| **Read** | Read any file | Analysis, code review |
-| **Write** | Create new files | Code generation |
-| **Edit** | Modify existing files | Refactoring, fixes |
-| **Bash** | Run terminal commands | Build, test, deploy |
-| **Glob** | Find files by pattern | Codebase exploration |
-| **Grep** | Search file contents | Code search |
-| **WebSearch** | Search the web | Current information |
-| **WebFetch** | Fetch web pages | Documentation, APIs |
-
-**Principle:** Grant minimum necessary tools. For pure text processing, use `allowed_tools=[]`.
-
----
-
-## Permission Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `bypassPermissions` | All tools auto-approved | Scripts, automation |
-| `acceptEdits` | File edits auto-approved | Code modification |
-| `default` | Prompt for each tool use | Interactive apps |
-| `plan` | No tool execution | Planning, dry-run |
-
-**For scripts and tools, always use `bypassPermissions`** to avoid interactive prompts.
-
----
-
-## Options Reference
-
-```python
-ClaudeAgentOptions(
-    # Tools
-    allowed_tools=["Read", "Glob"],  # Tools Claude can use
-    permission_mode="bypassPermissions",  # Auto-approve tools
-
-    # Context
-    system_prompt="You are a helpful assistant",  # Custom system prompt
-    cwd="/path/to/project",  # Working directory
-
-    # Limits
-    max_turns=10,  # Maximum agent turns
-
-    # Session
-    resume="session-id",  # Resume previous session
+result = await agent.ask(
+    "Classify: 'I absolutely love this product!'",
+    schema=Sentiment,
+    tier=Tier.LOW,
 )
+print(result.parsed.label)       # "positive"
+print(result.parsed.confidence)  # 0.97
+print(result.parsed.reasoning)   # "Strong positive language..."
+
+# result.parsed is a validated Sentiment instance
+# result.text still contains the raw response text
+```
+
+```python
+class CodeReview(BaseModel):
+    issues: list[str]
+    severity: str       # "low", "medium", "high", "critical"
+    suggestion: str
+
+review = await agent.ask(
+    f"Review this code:\n{code}",
+    schema=CodeReview,
+)
+for issue in review.parsed.issues:
+    print(f"- {issue}")
 ```
 
 ---
 
-## Real-World Examples
+## Agentic Use (Tools)
 
-### Commit Message Generator
+Give the model tools and multiple turns to complete complex tasks autonomously.
 
 ```python
-#!/usr/bin/env python3
-
-import asyncio
-import subprocess
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
-
-
-def get_git_diff() -> str:
-    result = subprocess.run(['git', 'diff', '--cached'], capture_output=True, text=True)
-    return result.stdout or subprocess.run(['git', 'diff'], capture_output=True, text=True).stdout
-
-
-async def generate_commit_message(diff: str) -> str:
-    prompt = f"""Write a clear, concise git commit message for this diff.
-
-Requirements:
-- Use imperative mood (e.g., "Add feature", "Fix bug")
-- Be concise but descriptive
-- Focus on what and why, not how
-- Return ONLY the commit message, nothing else
-
-Diff:
-{diff[:10000]}"""
-
-    response = ""
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(allowed_tools=[], permission_mode="bypassPermissions")
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    response += block.text
-
-    return response.strip()
-
-
-async def main():
-    diff = get_git_diff()
-    if not diff:
-        print("No changes to commit")
-        return
-
-    message = await generate_commit_message(diff)
-    print(message)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+result = await agent.ask(
+    "Find all TODO comments in this project and summarise them",
+    tools=["Read", "Glob", "Grep"],
+    max_turns=10,
+    cwd="/path/to/project",
+)
+print(result.text)
 ```
 
-### Safe Calculator (Natural Language to Python)
+Available tools: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`.
+
+Grant only what's needed. For pure text processing, omit `tools` entirely.
+
+---
+
+## Multi-Turn Conversations
 
 ```python
-#!/usr/bin/env python3
+from daz_agent_sdk import agent
 
-import asyncio
-import ast
-import json
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
+async with agent.conversation("code-review", system="You are a code reviewer") as chat:
+    # Each call maintains full conversation history
+    outline = await chat.say("Here's my PR diff:\n{diff}\nGive me an overview")
+    print(outline.text)
 
-ALLOWED_IMPORTS = {"math", "fractions", "decimal", "statistics"}
+    details = await chat.say("Now focus on security concerns")
+    print(details.text)
 
-
-async def translate_to_python(expression: str) -> dict:
-    prompt = f"""Convert this math request into a Python expression.
-
-Return ONLY JSON with:
-- "python": string (single expression, no statements)
-- "imports": list of modules from {list(ALLOWED_IMPORTS)}
-
-User request: {expression}"""
-
-    response = ""
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(allowed_tools=[], permission_mode="bypassPermissions")
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    response += block.text
-
-    text = response.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    return json.loads(text)
-
-
-def safe_eval(expr: str, imports: list) -> any:
-    # Build safe namespace
-    ns = {"__builtins__": {}}
-    if "math" in imports:
-        import math
-        ns["math"] = math
-        ns.update({"pi": math.pi, "e": math.e})
-
-    # Validate and evaluate
-    ast.parse(expr, mode="eval")
-    return eval(expr, ns, {})
-
-
-async def calculate(expression: str) -> str:
-    plan = await translate_to_python(expression)
-    result = safe_eval(plan["python"], plan.get("imports", []))
-    return str(result)
-
-
-async def main():
-    import sys
-    expr = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "square root of 144"
-    print(await calculate(expr))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Structured output works in conversations too
+    summary = await chat.say("Rate the overall quality", schema=ReviewScore)
+    print(summary.parsed.score)
 ```
 
-### Script Generator
+### Streaming
 
 ```python
-#!/usr/bin/env python3
+async with agent.conversation("writer") as chat:
+    await chat.say("You are a technical writer")
 
-import asyncio
-import json
-import os
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
+    async for chunk in chat.stream("Write a guide to Python decorators"):
+        print(chunk, end="", flush=True)
+    print()  # newline after stream
+```
 
+### Forking Conversations
 
-async def generate_script(name: str, description: str) -> dict:
-    prompt = f"""Generate a script named {name}.
+Fork creates an independent copy of the conversation history. Changes to the fork don't affect the original.
 
-Description: {description}
+```python
+async with agent.conversation("brainstorm") as chat:
+    await chat.say("We're building a CLI tool. Give me 3 architecture options.")
 
-Requirements:
-- Use Bash unless Python is significantly better
-- Always start with a shebang
-- Keep it well-commented but concise
+    # Explore two directions independently
+    fork_a = chat.fork("option-a")
+    fork_b = chat.fork("option-b")
 
-Return ONLY valid JSON with:
-- "script": the complete script text
-- "documentation": markdown documentation
-- "reply": message to show the user
+    detail_a = await fork_a.say("Expand on option 1")
+    detail_b = await fork_b.say("Expand on option 2")
+```
 
-Return JSON only."""
+### MCP Server Integration
 
-    response = ""
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(allowed_tools=[], permission_mode="bypassPermissions")
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    response += block.text
+Pass MCP servers to give the conversation access to external tools.
 
-    text = response.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
+```python
+async with agent.conversation(
+    "data-task",
+    mcp_servers={
+        "database": {
+            "command": "/path/to/db-mcp-server",
+            "args": ["--connection", "postgres://..."],
+        },
+        "slack": {
+            "command": "/path/to/slack-mcp-server",
+        },
+    },
+) as chat:
+    response = await chat.say("Query the users table and post a summary to #reports")
+```
 
-    return json.loads(text)
+### Conversation Properties
 
+```python
+chat.history    # list[Message] — snapshot of conversation history
+chat.name       # str | None — conversation name
+chat.tier       # Tier — current tier
+```
 
-async def main():
-    import sys
-    if len(sys.argv) < 3:
-        print("Usage: create_script <name> <description>")
-        return
+---
 
-    name = sys.argv[1]
-    description = " ".join(sys.argv[2:])
+## Image Generation
 
-    result = await generate_script(name, description)
+Delegates to local `generate_image` binary. Tier controls step count (quality vs speed).
 
-    path = os.path.expanduser(f"~/bin/{name}")
-    with open(path, "w") as f:
-        f.write(result["script"])
-    os.chmod(path, 0o755)
+```python
+from daz_agent_sdk import agent, Tier
 
-    print(f"Created: {path}")
-    print(result["reply"])
+# Standard image
+result = await agent.image(
+    "A sunset over mountains",
+    width=1024,
+    height=1024,
+    output="sunset.jpg",
+)
+print(result.path)  # Path to generated image
 
+# Logo with transparent background (enforces PNG, runs BiRefNet removal automatically)
+logo = await agent.image(
+    "A minimalist fox logo, cyan on white",
+    width=256,
+    height=256,
+    transparent=True,
+    output="logo.png",
+)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Fast draft (2 steps)
+draft = await agent.image("A robot", width=512, height=512, tier=Tier.LOW)
+
+# All image() parameters:
+#   prompt, width, height       — required
+#   output                      — path (temp file if omitted)
+#   tier                        — controls step count (HIGH=16, MEDIUM=8, LOW=2)
+#   transparent                 — True → PNG + background removal
+#   model, steps, image, image_strength, guidance, quantize, seed, timeout
+```
+
+Step counts by tier: VERY_HIGH=32, HIGH=16, MEDIUM=8, LOW=2.
+
+---
+
+## Text-to-Speech
+
+```python
+audio = await agent.speak(
+    "Hello, welcome to the system",
+    voice="gary",           # default voice
+    output="greeting.wav",
+    speed=1.0,
+)
+print(audio.path)            # Path to WAV file
+print(audio.duration_seconds)
+```
+
+## Speech-to-Text
+
+```python
+text = await agent.transcribe(
+    "recording.wav",
+    model_size="small",    # "base", "small", "large-v3-turbo"
+    language="en",         # optional
+)
+print(text)
+```
+
+---
+
+## List Available Models
+
+```python
+from daz_agent_sdk import agent, Tier, Capability
+
+# All models
+models = await agent.models()
+for m in models:
+    print(f"{m.qualified_name} — {m.tier.value}, caps: {m.capabilities}")
+
+# Filter by tier
+high_models = await agent.models(tier=Tier.HIGH)
+
+# Filter by capability
+text_models = await agent.models(capability=Capability.TEXT)
 ```
 
 ---
@@ -442,154 +333,174 @@ if __name__ == "__main__":
 ## Error Handling
 
 ```python
-from claude_agent_sdk import (
-    ClaudeSDKError,      # Base error
-    CLINotFoundError,    # Claude Code not installed
-    CLIConnectionError,  # Connection issues
-    ProcessError,        # Process failed
-    CLIJSONDecodeError,  # JSON parsing issues
-)
+from daz_agent_sdk import agent, AgentError, ErrorKind
 
 try:
-    async for message in query(prompt="Hello"):
-        pass
-except CLINotFoundError:
-    print("Error: Claude Code CLI not found. Install with: curl -fsSL https://claude.ai/install.sh | bash")
-except ProcessError as e:
-    print(f"Process failed with exit code: {e.exit_code}")
-except CLIJSONDecodeError as e:
-    print(f"Failed to parse response: {e}")
+    answer = await agent.ask("Hello")
+except AgentError as e:
+    print(f"Error kind: {e.kind}")       # ErrorKind enum
+    print(f"Attempts: {e.attempts}")     # list of provider attempt details
+
+    if e.kind == ErrorKind.AUTH:
+        print("Authentication failed — check API keys")
+    elif e.kind == ErrorKind.RATE_LIMIT:
+        print("All providers rate limited")
+    elif e.kind == ErrorKind.TIMEOUT:
+        print("All providers timed out")
+    elif e.kind == ErrorKind.INVALID_REQUEST:
+        print("Bad request — caller bug")
+    elif e.kind == ErrorKind.NOT_AVAILABLE:
+        print("No providers available")
+    elif e.kind == ErrorKind.INTERNAL:
+        print("Internal provider error")
+```
+
+Error behavior:
+- `RATE_LIMIT`, `TIMEOUT`, `NOT_AVAILABLE`, `INTERNAL` → cascades to next provider in chain
+- `AUTH`, `INVALID_REQUEST` → raises immediately (no cascade)
+- In conversations: exponential backoff before cascade (1s, 2s, 4s... up to 60s)
+
+---
+
+## Bypass Tier — Use Specific Provider/Model
+
+```python
+# Force a specific provider
+answer = await agent.ask("Hello", provider="gemini")
+
+# Force a specific model
+answer = await agent.ask("Hello", model="claude-sonnet-4-6")
+
+# In conversations
+async with agent.conversation("task", provider="ollama", model="qwen3-8b") as chat:
+    response = await chat.say("Hello")
 ```
 
 ---
 
-## Best Practices
+## CLI
 
-### 1. Always Strip and Validate JSON Responses
+```bash
+# Single-shot query
+daz-agent-sdk ask "What is the capital of France?"
+daz-agent-sdk ask --tier low "Summarise this..."
 
-Claude may wrap JSON in markdown code blocks. Always handle this:
-
-```python
-def parse_json_response(text: str) -> dict:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    return json.loads(text)
-```
-
-### 2. Use Specific Prompts for Structured Output
-
-Be explicit about the exact JSON structure you expect:
-
-```python
-prompt = """Return ONLY valid JSON with these exact fields:
-- "answer": string
-- "confidence": float between 0 and 1
-- "reasoning": string
-
-No other text, just JSON."""
-```
-
-### 3. Limit Input Size
-
-Truncate large inputs to avoid token limits:
-
-```python
-prompt = f"Analyze this code:\n{code[:10000]}"
-```
-
-### 4. Use Minimal Tools
-
-Only grant tools that are actually needed:
-
-```python
-# Good: minimal permissions
-options = ClaudeAgentOptions(allowed_tools=[], permission_mode="bypassPermissions")
-
-# Only when file access is needed
-options = ClaudeAgentOptions(allowed_tools=["Read", "Glob"], permission_mode="bypassPermissions")
-```
-
-### 5. Handle Empty Responses
-
-Always check for empty responses:
-
-```python
-if not response.strip():
-    raise ValueError("Claude returned empty response")
+# List models
+daz-agent-sdk models
+daz-agent-sdk models --tier high
 ```
 
 ---
 
-## Imports Reference
+## Configuration
 
-Standard imports for Claude Agent SDK usage:
+Config file: `~/.daz-agent-sdk/config.yaml` (optional — sensible defaults work out of the box).
 
-```python
-import asyncio
-import json
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
+```yaml
+tiers:
+  high:
+    - claude:claude-opus-4-6
+    - gemini:gemini-2.5-pro
+  low:
+    - ollama:qwen3-8b
+
+providers:
+  gemini:
+    api_key_env: GEMINI_API_KEY
+  ollama:
+    base_url: http://localhost:11434
+
+image:
+  model: z-image-turbo
+  tiers:
+    high:   { steps: 16 }
+    medium: { steps: 8 }
+    low:    { steps: 2 }
+
+tts:
+  voices:
+    gary: { provider: local, voice_id: gary }
+
+logging:
+  directory: ~/.daz-agent-sdk/logs
+  level: info
+  retention_days: 30
+
+fallback:
+  single_shot:
+    strategy: immediate_cascade
+  conversation:
+    strategy: backoff_then_cascade
+    max_backoff_seconds: 60
 ```
 
-For error handling:
+---
 
+## Quick-Copy Templates
+
+### Minimal text query
 ```python
-from claude_agent_sdk import (
-    ClaudeSDKError,
-    CLINotFoundError,
-    CLIConnectionError,
-    ProcessError,
-    CLIJSONDecodeError,
+from daz_agent_sdk import agent
+answer = await agent.ask("Your prompt here")
+print(answer.text)
+```
+
+### Minimal structured query
+```python
+from pydantic import BaseModel
+from daz_agent_sdk import agent
+
+class Result(BaseModel):
+    answer: str
+    confidence: float
+
+result = await agent.ask("Your prompt", schema=Result)
+print(result.parsed.answer)
+```
+
+### Minimal conversation
+```python
+from daz_agent_sdk import agent
+
+async with agent.conversation("task-name") as chat:
+    r = await chat.say("First message")
+    r = await chat.say("Follow-up")
+```
+
+### Minimal agentic
+```python
+from daz_agent_sdk import agent
+
+result = await agent.ask(
+    "Find and fix the bug",
+    tools=["Read", "Edit", "Glob", "Grep", "Bash"],
+    max_turns=15,
+    cwd="/path/to/project",
 )
 ```
-
----
-
-## Quick Copy Templates
-
-### Minimal Text Query
-
-```python
-async def ask(prompt: str) -> str:
-    r = ""
-    async for m in query(prompt=prompt, options=ClaudeAgentOptions(allowed_tools=[], permission_mode="bypassPermissions")):
-        if isinstance(m, AssistantMessage):
-            for b in m.content:
-                if isinstance(b, TextBlock):
-                    r += b.text
-    return r.strip()
-```
-
-### Minimal JSON Query
-
-```python
-async def ask_json(prompt: str) -> dict:
-    r = await ask(prompt)
-    if r.startswith("```"):
-        r = "\n".join(r.split("\n")[1:-1])
-    return json.loads(r)
-```
-
----
-
-## Existing Tools Using This Pattern
-
-Reference these in `~/bin` for real-world examples:
-- `commit` - Commit message generation
-- `create_script` - Script generation with JSON output
-- `calc` - Natural language calculator
-- `convert` - File format conversion planning
-- `fill-out-mr` - MR description generation
-- `publish-skill` - README and banner generation
 
 ---
 
 ## Do NOT Use
 
-- **Claude API directly** - Always use the Agent SDK
-- **API keys** - The SDK uses ambient authentication
-- **Manual tool loops** - The SDK handles this automatically
-- **Other LLM libraries** - Use the Agent SDK for Claude integration
+- **`claude_agent_sdk` directly** — daz-agent-sdk wraps it with fallback, tiers, and a cleaner API
+- **Claude API / `anthropic` SDK** — no direct API calls; use daz-agent-sdk
+- **`openai` SDK directly** — use daz-agent-sdk with Codex provider
+- **`google.genai` directly** — use daz-agent-sdk with Gemini provider
+- **Manual JSON parsing from AI responses** — use `schema=` with Pydantic models
+- **Manual markdown stripping** — structured output handles this automatically
+
+## Gotchas & Known Pitfalls
+
+### Anthropic OAuth
+- Tokens (sk-ant-oat01-*) require `anthropic-beta: oauth-2025-04-20` header. Refresh via `POST https://platform.claude.com/v1/oauth/token` with `{"grant_type":"refresh_token","refresh_token":"<rt>","client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`. Rate limit timestamps are Unix epoch integers.
+
+### claude_agent_sdk Inside Claude Code
+- `ClaudeAgentOptions.env` CANNOT unset env vars (SDK merges `{**os.environ, **options.env}`). Pop `CLAUDECODE` from `os.environ` before connecting, restore in finally.
+- `claude_agent_sdk` inside Claude Code produces `tool_use ids must be unique` errors — fundamental incompatibility. Use Go MCP binary over stdio JSON-RPC instead.
+- Streaming mode: `stream_input()` closes stdin immediately when no hooks/MCP servers configured. Workaround: pass dummy hooks or use `claude --print` subprocess.
+- `query()` yields 5 message types. Final answer is in `ResultMessage.result` — NOT in `AssistantMessage` TextBlocks.
+
+### daz_agent_sdk
+- `agent.ask()` prompts saying "Visit this URL" trigger tool calls instead of text blocks → `response.text == ""`. Phrase prompts to avoid tool use.
+- Pydantic `schema=` parameter: response has `.parsed` attribute. `resp.text` may be empty — always use `resp.parsed`.
