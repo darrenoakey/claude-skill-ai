@@ -504,3 +504,4 @@ result = await agent.ask(
 ### daz_agent_sdk
 - `agent.ask()` prompts saying "Visit this URL" trigger tool calls instead of text blocks → `response.text == ""`. Phrase prompts to avoid tool use.
 - Pydantic `schema=` parameter: response has `.parsed` attribute. `resp.text` may be empty — always use `resp.parsed`.
+- `transparent=True` runs BiRefNet (PyTorch segmentation model) locally on CPU unless `provider="spark"`. For batch image generation in daemon processes, always use spark to avoid burning 60%+ CPU on local neural network inference. The model resizes to 1024x1024 regardless of input size.
