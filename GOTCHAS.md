@@ -9,6 +9,12 @@
 - Streaming mode: `stream_input()` closes stdin immediately when no hooks/MCP servers configured. Workaround: pass dummy hooks or use `claude --print` subprocess.
 - `query()` yields 5 message types. Final answer is in `ResultMessage.result` — NOT in `AssistantMessage` TextBlocks.
 
+## claude_agent_sdk — Python Runtime
+- `async for msg in query()` crashes on unknown message types (e.g., `rate_limit_event`). Use manual `__anext__()` with try/except.
+- `claude_agent_sdk` from sync code: wrap with `asyncio.run()`. Never use `subprocess.run(["claude", ...])` inside Claude Code sessions.
+- `ProcessError` on non-zero exit can happen during teardown after success. Verify via DB/API rather than treating as failure.
+- `query()` from FastAPI background thread: use `ThreadPoolExecutor` + `asyncio.run()` inside the thread.
+
 ## daz_agent_sdk
 - `agent.ask()` prompts saying "Visit this URL" trigger tool calls instead of text blocks → `response.text == ""`. Phrase prompts to avoid tool use.
 - Pydantic `schema=` parameter: response has `.parsed` attribute. `resp.text` may be empty — always use `resp.parsed`.
